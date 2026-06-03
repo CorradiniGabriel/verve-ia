@@ -20,31 +20,26 @@ function detectarBanco(texto) {
   if (/santander/i.test(texto)) return 'santander'
   if (/caixa/i.test(texto)) return 'caixa'
   if (/sicoob|sicredi/i.test(texto)) return 'cooperativa'
-  return 'generico'
+  return 'desconhecido'
 }
 
 // Parser Unicred — formato do extrato enviado
 function parseUnicred(texto) {
   const lancamentos = []
 
-  // Extrai período
   const periodoMatch = texto.match(/Per[íi]odo de (\d{2}\/\d{2}\/\d{4}) a (\d{2}\/\d{2}\/\d{4})/)
   const periodo = periodoMatch
     ? { inicio: periodoMatch[1], fim: periodoMatch[2] }
     : null
 
-  // Extrai saldo inicial
   const saldoInicialMatch = texto.match(/Saldo em \d{2}\/\d{2}\/\d{4}:\s*R\$\s*([\d.,]+)/)
   const saldoInicial = saldoInicialMatch
     ? parseFloat(saldoInicialMatch[1].replace(/\./g, '').replace(',', '.'))
     : null
 
-  // Extrai conta
   const contaMatch = texto.match(/Conta:\s*(\d+)/)
   const conta = contaMatch ? contaMatch[1] : null
 
-  // Linhas de lançamento: data + descrição + valor + saldo
-  // Formato: DD/MM/YYYY DESCRICAO - R$ X.XXX,XX R$ X.XXX,XX
   const linhaRegex = /(\d{2}\/\d{2}\/\d{4})\s+(.*?)\s+([-+]?\s*R\$\s*[\d.,]+)\s+R\$\s*([\d.,]+)/gm
   let match
 
@@ -57,14 +52,13 @@ function parseUnicred(texto) {
 
     if (isNaN(valor) || isNaN(saldo)) continue
 
-    // Limpa histórico removendo Doc: e partes desnecessárias
     const historicoLimpo = historico
       .replace(/\(\s*Doc\.?:.*?\)/gi, '')
       .replace(/\s+/g, ' ')
       .trim()
 
     lancamentos.push({
-      data: data,
+      data,
       historico_bruto: historicoLimpo,
       historico_normalizado: normalizar(historicoLimpo),
       valor: Math.abs(valor),
@@ -99,7 +93,17 @@ function parseGenerico(texto) {
     })
   }
 
-  return { banco: 'generico', periodo: null, saldoInicial: null, conta: null, lancamentos }
+  return { banco: 'desconhecido', periodo: null, saldoInicial: null, conta: null, lancamentos }
+}
+
+// Extrai linhas brutas do texto para o usuário revisar quando parser falha
+function extrairLinhasBrutas(texto) {
+  const linhas = texto
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 5 && /\d/.test(l)) // só linhas com números
+    .slice(0, 80) // máximo 80 linhas para não sobrecarregar
+  return linhas
 }
 
 async function parsearExtrato(buffer) {
@@ -110,15 +114,33 @@ async function parsearExtrato(buffer) {
 
   let resultado
   switch (banco) {
-    case 'unicred': resultado = parseUnicred(texto); break
-    default: resultado = parseGenerico(texto)
+    case 'unicred':
+      resultado = parseUnicred(texto)
+      break
+    default:
+      resultado = parseGenerico(texto)
   }
 
+  // Nunca lança erro — se não extraiu lançamentos, retorna modo de revisão manual
   if (!resultado.lancamentos.length) {
-    throw new Error(`Nenhum lançamento encontrado. Banco detectado: ${banco}. Verifique se o PDF é um extrato bancário válido.`)
+    return {
+      banco: banco, // pode ser 'desconhecido' ou um banco detectado mas com parser sem match
+      bancoDetectado: banco !== 'desconhecido',
+      requer_revisao_manual: true,
+      texto_bruto_preview: texto.substring(0, 2000), // primeiros 2000 chars para debug
+      linhas_brutas: extrairLinhasBrutas(texto),
+      periodo: null,
+      saldoInicial: null,
+      conta: null,
+      lancamentos: []
+    }
   }
 
-  return resultado
+  return {
+    ...resultado,
+    requer_revisao_manual: false,
+    bancoDetectado: true
+  }
 }
 
 module.exports = { parsearExtrato, normalizar }
